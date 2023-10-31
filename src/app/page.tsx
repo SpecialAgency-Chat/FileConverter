@@ -1,10 +1,11 @@
 "use client";
 
-import { CORE_PATH, SERVICE_NAME } from "@/constants";
+import { CORE_PATH, SERVICE_NAME, WASM_PATH } from "@/constants";
 import { Kalam, Arimo } from "next/font/google";
 import { useCallback, useRef, useState } from "react";
 import { toast } from "react-toastify";
-import { createFFmpeg } from "@ffmpeg/ffmpeg";
+import { FFmpeg } from "@ffmpeg/ffmpeg";
+import { toBlobURL } from "@ffmpeg/util";
 
 const kalam = Kalam({ subsets: ["latin"], weight: ["400", "700"] });
 const arimo = Arimo({ subsets: ["latin"], weight: ["400", "700"] });
@@ -22,12 +23,12 @@ export default function Home() {
   const [mimeType, setMimeType] = useState<string | null>(null);
   const [extension, setExtension] = useState<string | null>(null);
   const [processing, setProcessing] = useState<boolean>(false);
+  const [logs, setLogs] = useState<string>("");
 
   const downloadRef = useRef<HTMLAnchorElement>(null);
 
   const onChangeFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    console.log(files);
     if (files && files[0]) {
       if (
         !SUPPORTED_MIME_TYPES.some((mimeType) =>
@@ -71,6 +72,7 @@ export default function Home() {
       }
 
       setProcessing(true);
+      setLogs("");
 
       const binaryData = new Uint8Array(await file.arrayBuffer());
 
@@ -79,35 +81,45 @@ export default function Home() {
         .slice(0, -1)
         .join(".")}-converted.${extension}`;
 
-      const ffmpeg = createFFmpeg({ corePath: CORE_PATH, log: true });
       try {
-        await ffmpeg.load();
+        const ffmpeg = new FFmpeg();
+        ffmpeg.on("log", (message) => {
+          setLogs((logs) => logs + message + "\n");
+        });
+
+        await ffmpeg.load({
+          coreURL: await toBlobURL(CORE_PATH, "text/javascript"),
+          wasmURL: await toBlobURL(WASM_PATH, "application/wasm"),
+        });
+        await ffmpeg.writeFile(file.name, binaryData);
+        await ffmpeg.exec(["-i", file.name, "-vcodec", "copy", distName]);
+        const videoUint8Array = await ffmpeg.readFile(distName);
+        try {
+          ffmpeg.terminate();
+        } catch (error) {
+          console.warn("ffmpeg exit error");
+          console.error(error);
+        }
+
+        const blob = new Blob([(videoUint8Array as Uint8Array).buffer], {
+          type: `${mimeType}/${extension}`,
+        });
+        const url = URL.createObjectURL(blob);
+        if (!downloadRef.current) throw new Error("downloadRef is null");
+        downloadRef.current.href = url;
+        downloadRef.current.download = distName;
+        downloadRef.current.click();
+        setProcessing(false);
+        toast.success("Successfully converted");
       } catch (e) {
-        if (e instanceof RangeError && e.message.includes("Memory")) {
+        if ((e instanceof RangeError && e.message.includes("Memory")) || (typeof e === "string" && e.includes("Memory"))) {
           toast.error("Memory error. Maybe your device memory is full?");
+          setProcessing(false);
           return;
         } else {
           throw e;
         }
       }
-      ffmpeg.FS("writeFile", file.name, binaryData);
-      await ffmpeg.run("-i", file.name, "-vcodec", "copy", distName);
-      const videoUint8Array = ffmpeg.FS("readFile", distName);
-      try {
-        ffmpeg.exit();
-      } catch (error) {
-        console.warn("ffmpeg exit error");
-        console.error(error);
-      }
-
-      const blob = new Blob([videoUint8Array.buffer], {
-        type: `${mimeType}/${extension}`,
-      });
-      const url = URL.createObjectURL(blob);
-      if (!downloadRef.current) throw new Error("downloadRef is null");
-      downloadRef.current.href = url;
-      downloadRef.current.download = distName;
-      downloadRef.current.click();
     },
     [file, mimeType, extension],
   );
@@ -171,6 +183,7 @@ export default function Home() {
               ></span>
               Convert
             </button>
+            <textarea className={`textarea textarea-bordered ${processing ? "":"hidden"} resize-none w-96 h-48`} readOnly value={logs}></textarea>
           </div>
         )}
       </form>
